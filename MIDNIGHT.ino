@@ -35,6 +35,15 @@ const int PIN_SCK  = SPI1_CK;    // PI_1
 const int PIN_MOSI = SPI1_COPI;  // PC_3
 const int PIN_DC   = GPIO_2;     // PD_4
 const int PIN_RST  = GPIO_1;     // PC_15
+const breakoutPin PIN_BL = PWM3;  // Backlight control
+const int PIN_VIBR = PWM4; // Vibration motor control (using PWM4 as GPIO output)
+
+// Button pins (all with external 10k pull-up resistors)
+const int BTN_RIGHT  = GPIO_3;   // Right button
+const int BTN_DOWN   = GPIO_4;   // Down button  
+const int BTN_LEFT   = GPIO_5;   // Left button
+const int BTN_UP     = GPIO_6;   // Up button
+const int BTN_OK     = GPIO_0;   // Middle/OK button
 
 // -------- Bit-bang SPI helpers (Mode 0) --------
 static inline void SCK_L(){ digitalWrite(PIN_SCK, LOW); }
@@ -65,6 +74,164 @@ static void wrDat(uint8_t d){
 
 static void wrDat16(uint16_t d){
   CS_L(); DC_D(); spiWriteByte(d>>8); spiWriteByte(d&0xFF); CS_H();
+}
+
+// -------- Backlight control --------
+static void setBacklight(uint8_t brightness){
+  // brightness: 0-255, but invert for MOSFET (high PWM = dim, low PWM = bright)
+  uint8_t invertedBrightness = 255 - brightness;
+  Breakout.analogWrite(PIN_BL, invertedBrightness);
+}
+
+// -------- Vibration motor control --------
+static void setVibration(bool on){
+  // Simple on/off control using GPIO
+  digitalWrite(PIN_VIBR, on ? HIGH : LOW);
+}
+
+static void vibrateShort(){
+  // Quick tactile feedback for navigation buttons
+  setVibration(true);   // Turn on
+  delay(80);            // Increased to 80ms for better feel
+  setVibration(false);  // Turn off
+}
+
+static void vibrateLong(){
+  // Longer feedback for confirmations
+  setVibration(true);   // Turn on
+  delay(200);           // 200ms duration
+  setVibration(false);  // Turn off
+}
+
+static void vibratePattern(){
+  // Double-pulse pattern for OK button (special confirmation)
+  setVibration(true);
+  delay(60);            // Slightly shorter pulses
+  setVibration(false);
+  delay(40);            // Shorter gap
+  setVibration(true);
+  delay(60);            // Second pulse
+  setVibration(false);
+}
+
+// Test function - call this from Serial Monitor
+static void testVibration(){
+  Serial.println("=== VIBRATION TEST ===");
+  Serial.println("1. Short pulse...");
+  vibrateShort();
+  delay(500);
+  Serial.println("2. Long pulse...");
+  vibrateLong();
+  delay(500);
+  Serial.println("3. Pattern...");
+  vibratePattern();
+  Serial.println("Vibration test complete!");
+}
+
+// -------- Multi-button handling with debouncing --------
+struct ButtonState {
+  int pin;
+  const char* name;
+  bool lastState;
+  bool currentState;
+  unsigned long lastDebounceTime;
+  bool wasPressed;
+};
+
+static ButtonState buttons[] = {
+  {BTN_RIGHT, "RIGHT", HIGH, HIGH, 0, false},
+  {BTN_DOWN,  "DOWN",  HIGH, HIGH, 0, false},
+  {BTN_LEFT,  "LEFT",  HIGH, HIGH, 0, false},
+  {BTN_UP,    "UP",    HIGH, HIGH, 0, false},
+  {BTN_OK,    "OK",    HIGH, HIGH, 0, false}
+};
+static const int numButtons = 5;
+static const unsigned long debounceDelay = 50;  // 50ms debounce
+
+static void updateButtons(){
+  for(int i = 0; i < numButtons; i++){
+    bool reading = digitalRead(buttons[i].pin);
+    
+    if (reading != buttons[i].lastState) {
+      buttons[i].lastDebounceTime = millis();
+    }
+    
+    if ((millis() - buttons[i].lastDebounceTime) > debounceDelay) {
+      if (reading != buttons[i].currentState) {
+        buttons[i].currentState = reading;
+        
+        if (buttons[i].currentState == LOW) {  // Button pressed
+          Serial.print("*** ");
+          Serial.print(buttons[i].name);
+          Serial.println(" BUTTON PRESSED ***");
+          buttons[i].wasPressed = true;
+        } else {  // Button released
+          Serial.print("*** ");
+          Serial.print(buttons[i].name);
+          Serial.println(" BUTTON RELEASED ***");
+        }
+      }
+    }
+    
+    buttons[i].lastState = reading;
+  }
+}
+
+static void checkAllButtons(){
+  static unsigned long lastPrint = 0;
+  
+  // Print all button states every 2000ms for debugging (less frequent)
+  if (millis() - lastPrint > 2000) {
+    Serial.print("Button states: ");
+    for(int i = 0; i < numButtons; i++){
+      bool reading = digitalRead(buttons[i].pin);
+      Serial.print(buttons[i].name);
+      Serial.print(":");
+      Serial.print(reading ? "HIGH" : "LOW");
+      if(i < numButtons-1) Serial.print(", ");
+    }
+    Serial.println();
+    
+    // Extra focus on UP and DOWN buttons
+    Serial.print("UP (GPIO_6) raw: ");
+    Serial.print(digitalRead(BTN_UP) ? "HIGH" : "LOW");
+    Serial.print(", DOWN (GPIO_4) raw: ");
+    Serial.println(digitalRead(BTN_DOWN) ? "HIGH" : "LOW");
+    
+    lastPrint = millis();
+  }
+  
+  // Update button states and detect presses
+  updateButtons();
+  
+  // Check for any button presses and handle them
+  for(int i = 0; i < numButtons; i++){
+    if(buttons[i].wasPressed){
+      Serial.print("==> ");
+      Serial.print(buttons[i].name);
+      Serial.println(" button action detected!");
+      
+      // Handle specific button actions with vibration feedback
+      if(buttons[i].pin == BTN_OK){
+        Serial.println("    -> OK button: Action confirmed!");
+        vibratePattern();  // Special double-pulse for OK button
+      } else if(buttons[i].pin == BTN_UP){
+        Serial.println("    -> UP button: Navigate up!");
+        vibrateShort();    // Quick pulse for navigation
+      } else if(buttons[i].pin == BTN_DOWN){
+        Serial.println("    -> DOWN button: Navigate down!");
+        vibrateShort();    // Quick pulse for navigation
+      } else if(buttons[i].pin == BTN_LEFT){
+        Serial.println("    -> LEFT button: Navigate left!");
+        vibrateShort();    // Quick pulse for navigation
+      } else if(buttons[i].pin == BTN_RIGHT){
+        Serial.println("    -> RIGHT button: Navigate right!");
+        vibrateShort();    // Quick pulse for navigation
+      }
+      
+      buttons[i].wasPressed = false;  // Reset the flag
+    }
+  }
 }
 
 // -------- Minimal ST7789 init sequence --------
@@ -135,16 +302,8 @@ static void attempt(const char* label, bool invert, uint16_t W, uint16_t H, uint
   pinMode(PIN_MOSI, OUTPUT); MOSI_W(LOW);
   pinMode(pinDC, OUTPUT); digitalWrite(pinDC, HIGH);
   panelReset(pinRST);
-  // Rebind DC helpers to chosen pin (keep simple by writing directly)
-  // init (DC pin in wrCmd/wrDat uses PIN_DC; update it temporarily)
-  // We'll temporarily alias PIN_DC using a function pointer-like pattern:
-  // (simplify: we just use the global PIN_DC; but for swapped pass we pass pins swapped)
-  // For swapped pass we'll redefine DC/RESET calls by temporarily changing DDR—handled by parameters.
-
-  // Minor hack: map DC_C/DC_D to chosen pin
-  // (do it by writing directly in wrCmd/wrDat via digitalWrite(PIN_DC,...))
-  // so we must temporarily set the global to the provided pin.
-  // We'll do it by casting away const-ness (safe here for demo).
+  
+  // For DC/RST swapping, we need to update the global DC pin reference
   *(int*)&PIN_DC = pinDC;
 
   st7789_init_common(invert);
@@ -152,21 +311,112 @@ static void attempt(const char* label, bool invert, uint16_t W, uint16_t H, uint
   delay(3000);
 }
 
+// Demo animation after we find working config
+static void runDemo(uint16_t W, uint16_t H, uint16_t xofs){
+  Serial.println("Running demo animation...");
+  
+  // Animated color sweep
+  for(int frame = 0; frame < 20; frame++){
+    uint16_t colors[] = {
+      0xF800 + (frame * 0x0841),  // Red to yellow
+      0x07E0 + (frame * 0x0020),  // Green variations  
+      0x001F + (frame * 0x0800),  // Blue to magenta
+      0xFFFF - (frame * 0x1084)   // White to cyan
+    };
+    
+    for(int i = 0; i < 4; i++){
+      setAddrWindow(0, i * (H/4), W, H/4, xofs);
+      uint32_t pixels = (uint32_t)W * (H/4);
+      CS_L(); DC_D();
+      for(uint32_t p = 0; p < pixels; p++){
+        spiWriteByte(colors[i] >> 8);
+        spiWriteByte(colors[i] & 0xFF);
+      }
+      CS_H();
+    }
+    delay(50);
+  }
+}
+
 void setup(){
   Serial.begin(115200);
   delay(100);
+  Serial.println("MIDNIGHT01: Bit-banged ST7789 Test + Demo");
+  Serial.println("==========================================");
 
-  // PASS 1: DC=GPIO_2, RST=GPIO_1
-  attempt("A) 170x320 inv=0 xofs=35", false, 170, 320, 35, GPIO_2, GPIO_1);
-  attempt("A) 170x320 inv=1 xofs=35", true,  170, 320, 35, GPIO_2, GPIO_1);
-  attempt("A) 170x320 inv=0 xofs=0",  false, 170, 320, 0,  GPIO_2, GPIO_1);
-  attempt("A) 240x320 inv=0 xofs=0",  false, 240, 320, 0,  GPIO_2, GPIO_1);
+  // Setup backlight
+  pinMode(PIN_BL, OUTPUT);
+  Serial.println("Testing backlight...");
+  setBacklight(255);  // Full brightness for 1 second
+  delay(1000);
+  setBacklight(200);  // Then 80% brightness
+  Serial.println("Backlight test complete");
 
-  // PASS 2: swapped DC/RST (some boards mislabel RES/DC)
-  attempt("B) 170x320 inv=0 xofs=35 (swapped DC/RST)", false, 170, 320, 35, GPIO_1, GPIO_2);
-  attempt("B) 170x320 inv=1 xofs=35 (swapped DC/RST)", true,  170, 320, 35, GPIO_1, GPIO_2);
-  attempt("B) 170x320 inv=0 xofs=0 (swapped DC/RST)",  false, 170, 320, 0,  GPIO_1, GPIO_2);
-  attempt("B) 240x320 inv=0 xofs=0 (swapped DC/RST)",  false, 240, 320, 0,  GPIO_1, GPIO_2);
+  // Setup vibration motor
+  pinMode(PIN_VIBR, OUTPUT);
+  Serial.println("Testing vibration motor...");
+  Serial.println("Wire: PWM4 -> [680R] -> PN2222A base, PN2222A collector -> motor(-), motor(+) -> 3.3V");
+  
+  // Test vibration motor
+  Serial.println("Testing vibration motor...");
+  vibrateLong();
+  delay(500);
+  Serial.println("Vibration test complete");
+
+  // Setup all 5 buttons with external 10k pull-up resistors
+  pinMode(BTN_RIGHT, INPUT);
+  pinMode(BTN_DOWN, INPUT);
+  pinMode(BTN_LEFT, INPUT);
+  pinMode(BTN_UP, INPUT);
+  pinMode(BTN_OK, INPUT);
+  
+  Serial.println("5-Button Navigation Setup:");
+  Serial.println("  RIGHT: GPIO_3 -> 3.3V via 10k, Button to GND");
+  Serial.println("  DOWN:  GPIO_4 -> 3.3V via 10k, Button to GND");
+  Serial.println("  LEFT:  GPIO_5 -> 3.3V via 10k, Button to GND");
+  Serial.println("  UP:    GPIO_6 -> 3.3V via 10k, Button to GND");
+  Serial.println("  OK:    GPIO_0 -> 3.3V via 10k, Button to GND");
+  Serial.println("Press any button to test...");
+
+  // LED indicator
+  pinMode(LED_BUILTIN, OUTPUT);
+
+  Serial.println("Display tests disabled - focusing on buttons and vibration");
+  Serial.println("Starting button and vibration motor test...");
 }
 
-void loop(){}
+void loop(){
+  // Check all buttons continuously
+  checkAllButtons();
+  
+  // Check for Serial commands
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    
+    if (cmd == "vibrate" || cmd == "v") {
+      testVibration();
+    } else if (cmd == "pwm") {
+      Serial.println("Testing PWM4 vibration motor...");
+      Serial.println("Motor ON for 1 second...");
+      setVibration(true);
+      delay(1000);
+      setVibration(false);
+      Serial.println("Motor OFF - test complete");
+    }
+  }
+  
+  // Simple LED indicator and button/vibration focus
+  static bool ledState = false;
+  ledState = !ledState;
+  digitalWrite(LED_BUILTIN, ledState);
+  
+  // Keep backlight at steady 80% brightness
+  static bool backlightSet = false;
+  if (!backlightSet) {
+    setBacklight(200);  // 80% brightness
+    backlightSet = true;
+  }
+  
+  delay(10);  // Small delay for button responsiveness
+}
